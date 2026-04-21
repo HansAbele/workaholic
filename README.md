@@ -1,161 +1,162 @@
 # Workaholic
 
-Daemon ligero para Windows que mantiene la máquina principal activa durante el
-horario laboral, evitando que DeskTime registre periodos "idle" cuando estás
-trabajando desde otro equipo.
+Lightweight Windows daemon that keeps the primary workstation active during
+work hours, preventing DeskTime from registering idle gaps when you are
+actually working from another device.
 
 ---
 
-## 1. ¿Qué hace?
+## 1. What it does
 
-Cada ~4 minutos, durante tu horario laboral, mueve el cursor del mouse 1 pixel
-a la derecha y lo regresa a su posición original. Este "nudge" es
-imperceptible visualmente, pero el sistema operativo lo registra como evento
-de input válido, y DeskTime lo cuenta como actividad.
+Every ~4 minutes during your work hours, it moves the mouse cursor 1 pixel to
+the right and back to its original position. The "nudge" is visually
+imperceptible, but the operating system registers it as a valid input event
+and DeskTime counts it as activity.
 
-Además, mientras estás en horario laboral, **le pide a Windows que no se
-duerma ni suspenda** (keep-awake), porque si el equipo entra en reposo el
-proceso se congela y aparecería un gap en DeskTime igual que antes.
+On top of that, while you are within the work window, it **asks Windows not
+to sleep or suspend** (keep-awake) — otherwise the process would be frozen
+during sleep and an idle gap would still appear in DeskTime.
 
-Fuera del horario laboral el proceso sigue vivo pero no hace nada (modo
-**guard**), se **libera el keep-awake** para que el equipo pueda dormir
-normalmente, y no aparecen eventos sospechosos a las 3 AM ni durante tu hora
-de almuerzo.
+Outside of work hours the process stays alive but does nothing (**guard**
+mode), the keep-awake request is released so the machine can sleep normally,
+and no suspicious activity appears at 3 AM or during lunch.
 
 ---
 
-## 2. Cómo funciona
+## 2. How it works
 
-### 2.1 Heartbeat (latido)
-- **Mecanismo**: `pyautogui.moveRel(1, 0, duration=0.1)` seguido de
+### 2.1 Heartbeat
+- **Mechanism**: `pyautogui.moveRel(1, 0, duration=0.1)` followed by
   `pyautogui.moveRel(-1, 0, duration=0.1)`.
-- **Por qué mouse y no teclado**: una pulsación de teclado podría
-  introducir caracteres si estás escribiendo en otra ventana. El cursor solo
-  se mueve 1 px, ida y vuelta, así que nunca interfiere.
-- **Intervalo**: 240 s (4 min) con jitter aleatorio de ±15 s. El umbral de
-  idle por defecto de DeskTime es 5 min, así que 4 min da margen de
-  seguridad. El jitter evita un patrón perfectamente mecánico.
+- **Why mouse and not keyboard**: a keystroke could leak characters into
+  whatever window you have focused. A 1-px mouse nudge that returns to the
+  origin never interferes with typing.
+- **Interval**: 240 s (4 min) with a random jitter of ±15 s. DeskTime's
+  default idle threshold is 5 min, so 4 min leaves a safety margin. The
+  jitter breaks any perfectly mechanical pattern.
 
-### 2.2 Ventana de horario
-El programa solo emite heartbeats cuando se cumplen **todas** estas
-condiciones:
+### 2.2 Work window
+A heartbeat is emitted only when **all** of the following hold:
 
-| Condición        | Valor                           |
-|------------------|---------------------------------|
-| Día de la semana | Lunes a viernes                 |
-| Hora             | 09:00 – 18:00                   |
-| Excepción        | Pausa 13:00 – 14:00 (almuerzo)  |
+| Condition   | Value                           |
+|-------------|---------------------------------|
+| Day of week | Monday through Friday           |
+| Time of day | 09:00 – 18:00                   |
+| Exception   | Pause 13:00 – 14:00 (lunch)     |
 
-Fuera de esa ventana el loop duerme 60 s y vuelve a chequear.
+Outside that window the loop sleeps 60 s and re-checks.
 
 ### 2.3 Logging
-- Archivo: `%USERPROFILE%\workaholic.log` (p. ej.
+- File: `%USERPROFILE%\workaholic.log` (e.g.
   `C:\Users\USER\workaholic.log`).
-- Rotación: archivos de hasta 1 MB, conserva 3 copias (`workaholic.log`,
+- Rotation: up to 1 MB per file, 3 backups kept (`workaholic.log`,
   `workaholic.log.1`, …).
-- Formato: `YYYY-MM-DD HH:MM:SS [NIVEL] mensaje`.
-- Excepciones fatales se capturan con `try/except` y se escriben con
-  traceback completo antes de que el proceso muera.
+- Format: `YYYY-MM-DD HH:MM:SS [LEVEL] message`.
+- Fatal exceptions are captured by `try/except` and written with a full
+  traceback before the process exits.
 
-### 2.4 Ejecución invisible
-El script se llama `workaholic.pyw`. Windows asocia la extensión `.pyw` con
-`pythonw.exe` (Python sin consola), por lo que corre en segundo plano sin
-ventana.
+### 2.4 Headless execution
+The script is named `workaholic.pyw`. Windows associates the `.pyw`
+extension with `pythonw.exe` (console-less Python), so it runs fully in the
+background.
 
-### 2.5 Autoarranque
-No usamos la carpeta *Startup* ni el registro de Windows. Usamos el
-**Programador de Tareas** porque permite:
-- Reintentar si el proceso falla (3 reintentos con 1 min de espera).
-- Correr tanto con batería como con corriente.
-- Arrancar automáticamente si el equipo estaba apagado en el momento del
-  trigger (`StartWhenAvailable`).
-- Una sola instancia a la vez (`MultipleInstances IgnoreNew`).
+### 2.5 Autostart
+We don't use the *Startup* folder or the Windows Registry. Instead we use
+**Task Scheduler**, which lets us:
+- Retry automatically on failure (3 retries, 1 min apart).
+- Run on battery as well as AC power.
+- Start as soon as the machine is available if it was off at trigger time
+  (`StartWhenAvailable`).
+- Keep a single instance alive (`MultipleInstances IgnoreNew`).
 
-### 2.6 Keep-awake (evitar reposo/suspensión)
-Si el equipo se duerme, el proceso se congela y no puede enviar heartbeats,
-así que aparecería un gap en DeskTime igual que antes. Para evitarlo, cuando
-entramos a la ventana laboral llamamos a la API de Windows
-**`SetThreadExecutionState`** (vía `ctypes`) con los flags:
+### 2.6 Keep-awake (prevent sleep/suspend)
+If the machine sleeps, the process freezes and cannot send heartbeats — the
+DeskTime gap would reappear. To prevent that, when entering the work window
+we call the Windows API **`SetThreadExecutionState`** (via `ctypes`) with
+these flags:
 
-| Flag                 | Efecto                                            |
-|----------------------|---------------------------------------------------|
-| `ES_CONTINUOUS`      | El flag persiste hasta que lo cambiemos.          |
-| `ES_SYSTEM_REQUIRED` | El sistema no entra en reposo mientras esté puesto. |
+| Flag                 | Effect                                                |
+|----------------------|-------------------------------------------------------|
+| `ES_CONTINUOUS`      | The flag persists until it is changed.                |
+| `ES_SYSTEM_REQUIRED` | The system does not enter sleep while the flag is set.|
 
-- Al **entrar** a la ventana laboral → se activa el flag (el equipo no
-  duerme).
-- Al **salir** (almuerzo, fin de jornada, fin de semana) → se libera el flag
-  (el equipo puede dormir normalmente como siempre).
-- Al **terminar** el proceso → hay un `try/finally` que libera el flag,
-  incluso ante una excepción fatal.
+- **Entering** the work window → flag set (machine stays awake).
+- **Leaving** (lunch, end of day, weekend) → flag released (machine can
+  sleep normally again).
+- **On process exit** → a `try/finally` releases the flag even after a fatal
+  exception.
 
-Notas:
-- **No afecta la pantalla**: solo evita que el sistema se suspenda. El
-  monitor puede apagarse/atenuarse igual. Si quisieras mantener la pantalla
-  también, habría que sumar el flag `ES_DISPLAY_REQUIRED`.
-- **No requiere admin**: cualquier proceso puede pedirlo para sí mismo.
-- **Se limita al horario**: fuera de la ventana laboral el equipo se duerme
-  como cualquier máquina normal, ahorrando batería.
+Notes:
+- **Does not affect the display**: only system sleep is prevented. The
+  monitor can still dim/turn off. Add `ES_DISPLAY_REQUIRED` if you also want
+  to keep the screen on.
+- **No admin required**: any process can request this for itself.
+- **Scoped to work hours**: outside the work window the machine sleeps
+  normally and saves battery.
 
 ---
 
-## 3. Archivos del proyecto
+## 3. Project files
 
-| Archivo               | Propósito                                                   |
+| File                  | Purpose                                                     |
 |-----------------------|-------------------------------------------------------------|
-| `workaholic.pyw`      | Script principal. Corre el loop de heartbeat + guard.       |
-| `install_task.ps1`    | Registra la tarea programada `Workaholic` en Windows.       |
-| `requirements.txt`    | Dependencias de Python (pyautogui).                         |
-| `README.md`           | Este documento.                                             |
-| `CODE_WALKTHROUGH.md` | Explicación línea por línea del código (educativo).         |
-| `LICENSE`             | Licencia MIT.                                               |
+| `workaholic.pyw`      | Main script. Runs the heartbeat + guard loop.               |
+| `install_task.ps1`    | Registers the `Workaholic` scheduled task on Windows.       |
+| `requirements.txt`    | Python dependencies (pyautogui).                            |
+| `README.md`           | This document.                                              |
+| `CODE_WALKTHROUGH.md` | Line-by-line code explanation (educational, in Spanish).    |
+| `LICENSE`             | MIT License.                                                |
 
 ---
 
-## 4. Requisitos previos
+## 4. Prerequisites
 
 - **Windows 10 / 11**.
-- **Python 3.x** instalado y en el `PATH` (debe resolverse `pythonw.exe`).
-  Verifica con:
+- **Python 3.x** installed and on `PATH` (`pythonw.exe` must resolve).
+  Verify with:
   ```powershell
   Get-Command pythonw.exe
   ```
-- **Privilegios de administrador** para registrar la tarea programada.
+- **Administrator privileges** to register the scheduled task.
 
 ---
 
-## 5. Instalación
+## 5. Installation
 
-Abre **PowerShell como Administrador** y ejecuta, en este orden:
+Open **PowerShell as Administrator** and run, in order:
 
 ```powershell
-# 1. Ir a la carpeta del proyecto
-cd C:\Users\USER\Documents\PX\WORKFORCE\workaholic
+# 1. Clone the repo (or download the zip and cd into it)
+git clone https://github.com/HansAbele/workaholic.git
+cd workaholic
 
-# 2. Instalar la dependencia Python
+# 2. Install the Python dependency
 pip install -r requirements.txt
 
-# 3. Registrar la tarea programada
+# 3. Register the scheduled task
 powershell -ExecutionPolicy Bypass -File .\install_task.ps1
 
-# 4. Arrancar ahora (sin esperar al próximo logon)
+# 4. Start it now (without waiting for next logon)
 Start-ScheduledTask -TaskName Workaholic
 ```
 
-Tras el paso 3 verás en verde:
+After step 3 you should see in green:
 `Scheduled task 'Workaholic' registered. It will run at next logon.`
+
+> **Tip**: if your work hours differ, edit the constants at the top of
+> `workaholic.pyw` (see [Configuration](#8-configuration)) **before** step 3.
 
 ---
 
-## 6. Verificación
+## 6. Verification
 
-Sigue el log en vivo:
+Tail the log:
 
 ```powershell
 Get-Content $env:USERPROFILE\workaholic.log -Wait -Tail 20
 ```
 
-Dentro de los primeros 4 minutos (en horario laboral) deberías ver:
+Within the first 4 minutes (during work hours) you should see:
 
 ```
 2026-04-21 09:05:12 [INFO] Workaholic started (pid=12345, log=C:\Users\USER\workaholic.log)
@@ -164,76 +165,76 @@ Dentro de los primeros 4 minutos (en horario laboral) deberías ver:
 2026-04-21 09:13:04 [INFO] Heartbeat sent (cursor nudge).
 ```
 
-A las 13:00: `Outside work window — entering guard mode; keep-awake OFF.`
-A las 14:00: `Entering work window — heartbeat active; keep-awake ON.`
+At 13:00: `Outside work window — entering guard mode; keep-awake OFF.`
+At 14:00: `Entering work window — heartbeat active; keep-awake ON.`
 
-Usa `Ctrl+C` para salir del `tail`.
+Press `Ctrl+C` to exit the tail.
 
 ---
 
-## 7. Operaciones comunes
+## 7. Common operations
 
 ```powershell
-# Ver estado de la tarea
+# Task status
 Get-ScheduledTask -TaskName Workaholic | Select TaskName, State
 
-# Arrancar manualmente
+# Start manually
 Start-ScheduledTask -TaskName Workaholic
 
-# Parar el proceso en curso (no desinstala la tarea)
+# Stop the running process (does not uninstall the task)
 Stop-ScheduledTask -TaskName Workaholic
 
-# Ver las últimas 50 líneas del log
+# Show the last 50 log lines
 Get-Content $env:USERPROFILE\workaholic.log -Tail 50
 ```
 
 ---
 
-## 8. Configuración (tunning)
+## 8. Configuration
 
-Todos los parámetros ajustables están como constantes al inicio de
+All tunable parameters are declared as constants at the top of
 `workaholic.pyw`:
 
-| Constante                     | Default | Descripción                                   |
+| Constant                      | Default | Description                                   |
 |-------------------------------|---------|-----------------------------------------------|
-| `HEARTBEAT_INTERVAL_SECONDS`  | 240     | Intervalo base entre heartbeats (s).          |
-| `HEARTBEAT_JITTER_SECONDS`    | 15      | Variación aleatoria ± (s).                    |
-| `MOUSE_NUDGE_PIXELS`          | 1       | Pixels que se mueve el cursor.                |
-| `MOUSE_MOVE_DURATION`         | 0.1     | Duración de cada transición (s).              |
-| `WORK_DAYS`                   | Mon–Fri | Set de días laborables (Mon=0).               |
-| `WORK_START` / `WORK_END`     | 09–18   | Ventana de trabajo.                           |
-| `LUNCH_START` / `LUNCH_END`   | 13–14   | Pausa de almuerzo.                            |
-| `GUARD_POLL_SECONDS`          | 60      | Frecuencia de chequeo fuera de horario.       |
+| `HEARTBEAT_INTERVAL_SECONDS`  | 240     | Base interval between heartbeats (s).         |
+| `HEARTBEAT_JITTER_SECONDS`    | 15      | Random variation ± (s).                       |
+| `MOUSE_NUDGE_PIXELS`          | 1       | Pixels the cursor moves.                      |
+| `MOUSE_MOVE_DURATION`         | 0.1     | Duration of each transition (s).              |
+| `WORK_DAYS`                   | Mon–Fri | Set of workdays (Mon=0).                      |
+| `WORK_START` / `WORK_END`     | 09–18   | Work window.                                  |
+| `LUNCH_START` / `LUNCH_END`   | 13–14   | Lunch break.                                  |
+| `GUARD_POLL_SECONDS`          | 60      | Re-check frequency outside work hours.        |
 
-Después de editar, reinicia la tarea:
+After editing, restart the task:
 
 ```powershell
 Stop-ScheduledTask  -TaskName Workaholic
 Start-ScheduledTask -TaskName Workaholic
 ```
 
-> **Cuidado** con subir `HEARTBEAT_INTERVAL_SECONDS` por encima de 285 s:
-> el jitter positivo podría empujarlo a 300 s, que es el umbral idle de
-> DeskTime.
+> **Warning**: do not raise `HEARTBEAT_INTERVAL_SECONDS` above 285 s —
+> positive jitter could push the actual delay to 300 s, which is DeskTime's
+> idle threshold.
 
 ---
 
-## 9. Desinstalación
+## 9. Uninstall
 
-Abre **PowerShell como Administrador** y ejecuta:
+Open **PowerShell as Administrator** and run:
 
 ```powershell
-# 1. Parar y eliminar la tarea programada
+# 1. Stop and remove the scheduled task
 Stop-ScheduledTask       -TaskName Workaholic -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName Workaholic -Confirm:$false
 
-# 2. (Opcional) Borrar los archivos del proyecto
-Remove-Item -Recurse -Force C:\Users\USER\Documents\PX\WORKFORCE\workaholic
+# 2. (Optional) Remove the project files
+Remove-Item -Recurse -Force .\workaholic
 
-# 3. (Opcional) Borrar los logs
+# 3. (Optional) Remove log files
 Remove-Item $env:USERPROFILE\workaholic.log*
 
-# 4. (Opcional) Desinstalar la dependencia Python
+# 4. (Optional) Uninstall the Python dependency
 pip uninstall pyautogui
 ```
 
@@ -241,16 +242,16 @@ pip uninstall pyautogui
 
 ## 10. Troubleshooting
 
-| Síntoma                                          | Qué revisar                                                                 |
-|--------------------------------------------------|-----------------------------------------------------------------------------|
-| No aparece `workaholic.log` después de arrancar  | La tarea no está corriendo: `Get-ScheduledTask -TaskName Workaholic`.       |
-| Log dice `ModuleNotFoundError: pyautogui`        | Falta `pip install pyautogui` en el mismo Python que resuelve `pythonw.exe`.|
-| `install_task.ps1` falla con "Access denied"     | No abriste PowerShell como Administrador.                                   |
-| DeskTime sigue marcando idle                     | Revisa el intervalo; tal vez DeskTime tiene umbral < 5 min en tu org.       |
-| El cursor "salta" visiblemente                   | Reduce `MOUSE_NUDGE_PIXELS` a 1 (default) y/o sube `MOUSE_MOVE_DURATION`.   |
-| `Outside work window` a media jornada            | Revisa la hora del sistema y la zona horaria de Windows.                    |
+| Symptom                                         | What to check                                                                 |
+|-------------------------------------------------|-------------------------------------------------------------------------------|
+| `workaholic.log` never appears after starting   | Task is not running: `Get-ScheduledTask -TaskName Workaholic`.                |
+| Log shows `ModuleNotFoundError: pyautogui`      | `pip install -r requirements.txt` ran on a different Python than `pythonw.exe`.|
+| `install_task.ps1` fails with "Access denied"   | PowerShell was not opened as Administrator.                                   |
+| DeskTime still marks idle                       | Check the interval; your org may have a DeskTime idle threshold below 5 min. |
+| The cursor visibly jumps                        | Keep `MOUSE_NUDGE_PIXELS` at 1 and/or raise `MOUSE_MOVE_DURATION`.            |
+| `Outside work window` in the middle of the day  | Check system time and timezone on Windows.                                    |
 
-Para ver el histórico de ejecuciones de la tarea:
+To inspect the task's run history:
 
 ```powershell
 Get-ScheduledTaskInfo -TaskName Workaholic
@@ -258,20 +259,26 @@ Get-ScheduledTaskInfo -TaskName Workaholic
 
 ---
 
-## 11. Notas de diseño
+## 11. Design notes
 
-- **`pyautogui.FAILSAFE = False`**: pyautogui aborta por defecto si el cursor
-  toca una esquina de la pantalla. El heartbeat debe sobrevivir incluso si el
-  cursor está en reposo en una esquina, por eso lo desactivamos.
-- **`RotatingFileHandler`** en vez de `FileHandler`: evita que el log crezca
-  indefinidamente.
-- **Chequeo de ventana cada iteración** (no un sleep largo): si cambia la hora
-  del sistema (p. ej. cambio de DST), el guard detecta la transición en
-  menos de 60 s.
-- **Keep-awake vía `SetThreadExecutionState`** en lugar de cambiar el plan de
-  energía de Windows: (a) no requiere admin, (b) es automático — al morir el
-  proceso, Windows vuelve al comportamiento normal; (c) se limita al horario
-  laboral, así fuera de jornada la máquina ahorra energía como siempre.
-- **`try/finally` alrededor del loop**: garantiza que `set_keep_awake(False)`
-  siempre se llame al salir, incluso si hay una excepción fatal, evitando
-  dejar al sistema en modo "no duerme" tras un crash.
+- **`pyautogui.FAILSAFE = False`**: pyautogui aborts by default if the
+  cursor hits a screen corner. The heartbeat must survive a cursor resting
+  in a corner, so we disable the safeguard.
+- **`RotatingFileHandler`** instead of `FileHandler`: prevents the log file
+  from growing indefinitely.
+- **Work-window check every iteration** (not one long sleep): if the system
+  clock changes (e.g. DST transition), the guard notices the transition in
+  under 60 s.
+- **Keep-awake via `SetThreadExecutionState`** instead of changing the
+  Windows power plan: (a) no admin required; (b) automatic cleanup — when
+  the process dies, Windows reverts to normal behavior; (c) scoped to the
+  work window, so energy is still saved after hours.
+- **`try/finally` around the loop**: guarantees `set_keep_awake(False)` is
+  called on exit, even after a fatal exception, so the system is never left
+  in "no sleep" mode after a crash.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
